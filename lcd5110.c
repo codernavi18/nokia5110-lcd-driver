@@ -25,10 +25,10 @@ int		lcd5110_init(void);
 /* Structure that declares the common */
 /* file access fcuntions */
 struct file_operations lcd5110_fops = {
-	read:		lcd5110_read,
+	read:		lcd5110_read, //just a placeholder
 	write:		lcd5110_write,
-	open:		lcd5110_open,
-	release:	lcd5110_release
+	open:		lcd5110_open, //just a placeholder
+	release:	lcd5110_release //just a placeholder
 };
 
 /* Driver global variables */
@@ -37,7 +37,11 @@ int lcd5110_major = 61;
 
 
 /* --- L C D   S P E C I F I C --------------------------------------------- */
-
+/*
+ * Each cell is considered to be of size 8*5, hence there are 5 bytes - 1 byte for each column
+ * For each byte, it starts setting the pixel from bottom to up, i.e. MSB sets bottom-most bit in vertical byte
+ * and LSB sets topmost bit in vertical byte.
+ */
 static const unsigned short ASCII[][5] =
 {
  {0x00, 0x00, 0x00, 0x00, 0x00} // 20
@@ -138,12 +142,14 @@ static const unsigned short ASCII[][5] =
 ,{0x00, 0x06, 0x09, 0x09, 0x06} // 7f .
 };
 
+//Raspberry-Pi Specific
 #define BCM2708_PERI_BASE        0x20000000
 #define GPIO_BASE                (BCM2708_PERI_BASE + 0x200000) /* GPIO controller */
 
 #define PAGE_SIZE (4*1024)
 #define BLOCK_SIZE (4*1024)
 
+//7 GPIO pins
 #define RES   17 // 0
 #define SCE   18 // 1
 #define DC    27 // 2
@@ -155,8 +161,8 @@ static const unsigned short ASCII[][5] =
 #define LCD_WIDTH 84
 #define LCD_HEIGHT 48
 
-#define LCD_C	0
-#define LCD_D	1
+#define LCD_C	0 //command
+#define LCD_D	1 //data
 
 void initLcdScreen(void);
 void clearLcdScreen(void);
@@ -183,13 +189,15 @@ int lcd5110_init(void) {
 	// request and set GPIO ports for lcd display to output
 	int pins[5] = {RES, SCE, DC, SDIN, SCLK};
 	char **pins_name = { "RES", "SCE", "DC", "SDIN", "SCLK" };
-        for (int g=0; g<6; g++)
+        for (int g=0; g<6; g++) //this should be g<5
         {
-		gpio_request(pins[g], pins_name[g]);
+			//request GPIOs
+			gpio_request(pins[g], pins_name[g]); //this will crash for g=5
         }
         for (int g=0; g<6; g++)
         {
-		gpio_direction_output(pins[g], 0);
+			//GPIOs will be used for output - default LOW
+			gpio_direction_output(pins[g], 0);
         }
 
 	initLcdScreen();
@@ -248,7 +256,7 @@ ssize_t lcd5110_write( struct file *filp, char *ubuf,
 	clearLcdScreen();
 	writeStringToLcd(kbuf);
 	kfree(kbuf);
-	
+
 	return count;
 }
 
@@ -265,13 +273,15 @@ void initLcdScreen()
 	gpio_set_value(RES, true);
 
 	// init LCD
-	sendByteToLcd(LCD_C, 0x21);	// LCD Extended Commands
-	sendByteToLcd(LCD_C, 0xb1);	// Set LCD Cop (Contrast).	//0xb1
-	sendByteToLcd(LCD_C, 0x04);	// Set Temp coefficent.		//0x04
-	sendByteToLcd(LCD_C, 0x14);	// LCD bias mode 1:48. 		//0x13
-	sendByteToLcd(LCD_C, 0x0c);	// LCD in normal mode. 0x0d inverse mode
-	sendByteToLcd(LCD_C, 0x20);
-	sendByteToLcd(LCD_C, 0x0c);
+	sendByteToLcd(LCD_C, 0x21);	// LCD Extended Commands - 0010 0001 - Function Set H=1 V=0 (HORIZONTAL)
+	sendByteToLcd(LCD_C, 0xb1);	// Set LCD Cop (Contrast).	//0xb1 - 1011 0001 - VOP
+	sendByteToLcd(LCD_C, 0x04);	// Set Temp coefficent.		//0x04 TCX
+	sendByteToLcd(LCD_C, 0x14);	// LCD bias mode 1:48. 		//0x13 BSX 0001 0100
+	//before running the below command we should set H=0 ???
+	sendByteToLcd(LCD_C, 0x0c);	// LCD in normal mode. 0x0d inverse mode  //0000 1100
+	//above line has any effect?
+	sendByteToLcd(LCD_C, 0x20); // Use basic instruction set H=0
+	sendByteToLcd(LCD_C, 0x0c); // Set normal display mode - 00001100
 
 	clearLcdScreen();
 }
@@ -279,20 +289,25 @@ void initLcdScreen()
 void sendByteToLcd(bool cd, unsigned char data)
 {
 	if(cd)
-		gpio_set_value(DC, true);
+		gpio_set_value(DC, true); //data mode
 	else
-		gpio_set_value(DC, false);
+		gpio_set_value(DC, false); //command mode
 
 	unsigned char pattern = 0b10000000;
+
+	//following is bit banging using GPIO pins
 	for(int i=0; i < 8; i++)
 	{
+		//set clock low
 		gpio_set_value(SCLK, false);
+		//set DIN as 0 or 1 - MSB goes first
 		if(data & pattern)
 			gpio_set_value(SDIN, true);
 		else
 			gpio_set_value(SDIN, false);
 
 		udelay(1);
+		//set clock HIGH since DIN is sampled when SCL is high
 		gpio_set_value(SCLK, true);
 		udelay(1);
 		pattern >>= 1;
@@ -301,15 +316,24 @@ void sendByteToLcd(bool cd, unsigned char data)
 
 void clearLcdScreen()
 {
+	/*
+	 * 48*64 BITS
+	 * But 1 byte writes 8 cells vertically, so effectively there are 6 * 84 cells to be iterated.
+	 * We are using horizontal iteration, so x goes from 0 to 83 and then wraps over (y incremented by 1)
+	 */
 	for(int i=0; i < LCD_WIDTH * LCD_HEIGHT / 8; i++)
 		sendByteToLcd(LCD_D, 0x00);
 
-	sendByteToLcd(LCD_C, 0x80 | 0); // set x coordinate to 0
-	sendByteToLcd(LCD_C, 0x40 | 0); // set y coordinate to 0
+	sendByteToLcd(LCD_C, 0x80 | 0); // set x coordinate to 0 - 10000000
+	sendByteToLcd(LCD_C, 0x40 | 0); // set y coordinate to 0 - 01000000
 }
 
 void writeCharToLcd(char data)
 {
+	//This is needed to draw a separator 1 byte vertical column between characters
+	//Its assumed that 2+5 = 7 bytes make 1 character, hence 12 characters can be drawn in a row
+	//Total 6 rows can be created
+	//No seperator needed between rows, since only 7 of the 8 bits are drawn, hence last bit by default acts as seperator.
 	sendByteToLcd(LCD_D, 0x00);
 	for(int i=0; i < 5; i++)
 		sendByteToLcd(LCD_D, ASCII[data-0x20][i]);
